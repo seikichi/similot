@@ -37,6 +37,7 @@ def _get_api(key, secret):
     auth.set_access_token(key, secret)
     return tweepy.API(auth)
 
+
 def _document_freq(docs):
     u"""
     >>> _document_freq([{'hoge': 1, 'fuga': 2}, {'piyo':3, 'hoge':1}, {'myo':1, 'fuga':1}]) \\
@@ -48,6 +49,7 @@ def _document_freq(docs):
         for w in d.iterkeys():
             df[w] = df.get(w, 0) + 1
     return df
+
 
 def _cosine_sim(v1, v2):
     u"""
@@ -77,8 +79,7 @@ def _tf_idf(vec, df, N):
     ret = {}
     words = float(sum(vec.itervalues()))
     for (key, val) in vec.iteritems():
-        if df.get(key):
-            ret[key] = (vec[key]/words) * math.log((N+1)/df[key])
+        ret[key] = (vec[key]/words) * math.log((N+1)/df[key])
     return ret
 
 
@@ -100,28 +101,6 @@ def _bag_of_words(post, tagger):
         node = node.next
     return bow
 
-def _add_old_weight(new, old, delta):
-    u"""
-    過去の発言のベクトルの重みを追加(時間差を考慮)
-    5分ぐらい前までの発言なら似たような発言に違いないという感じのヒューリスティック
-    """
-    delta = delta/60.0
-    if delta ** 0.5 > 0:
-        w_old = min(0.5, 0.5/(delta)**0.5)
-    else:
-        w_old = 0.0
-    w_new = 1.0 - w_old
-    vec = {}
-    for key,val in new.iteritems():
-        vec[key] = val*w_new
-    for key,val in old.iteritems():
-        vec[key] = vec.get(key, 0) + val*w_old
-    ret = {}
-    for key,val in vec.iteritems():
-        if val >= 1e-5:
-            ret[key] = val
-    return ret
-
 
 class Similot(object):
     '''retweet similar posts'''
@@ -141,18 +120,6 @@ class Similot(object):
             self._api[section] = _get_api(self._conf.get(section, 'key'),
                                           self._conf.get(section, 'secret'))
 
-    def _create_myvec(self, tagger):
-        screen_name = self._api['main'].me().screen_name
-        tl = self._api['main'].user_timeline(screen_name)
-        tl.reverse()
-        vec = _bag_of_words(tl[0].text, tagger)
-        created_at = tl[0].created_at
-        for s in tl[1:]:
-            vec = _add_old_weight(_bag_of_words(s.text, tagger), vec, (s.created_at-created_at).seconds)
-            created_at = s.created_at
-        return (vec, created_at)
-
-
     def run(self):
         '''main loop'''
         since_id = 0
@@ -167,8 +134,8 @@ class Similot(object):
             'bot':self._api['bot'].me().screen_name,
         }
         posts = []
-        prev = {}
-        myvec, my_created_at = self._create_myvec(tagger)
+        self_posts = [_bag_of_words(s.text, tagger) for s in self._api['main'].user_timeline(screen_names['main'])][:5]
+        self_posts.reverse()
 
         while True:
             try:
@@ -192,22 +159,20 @@ class Similot(object):
 
             # update self vec
             for s in (s for s in timeline if s.user.screen_name == screen_names['main']):
-                myvec = _add_old_weight(_bag_of_words(s.text, tagger), myvec, (s.created_at-my_created_at).seconds)
-                my_created_at = s.created_at
+                self_posts.append(_bag_of_words(s.text, tagger))
+            self_posts = self_posts[-5:]
 
             posts.extend(_bag_of_words(s.text, tagger) for s in timeline)
             posts = posts[-max_posts:]
-            df = _document_freq(posts)
+            df = _document_freq(posts+self_posts)
             N = len(posts)
-            myvec_ = _tf_idf(myvec, df, N)
+            self_posts_ = [_tf_idf(v, df, N) for v in self_posts]
 
             for s in new:
-                vec = _bag_of_words(s.text, tagger)
-                if prev.get(s.user.screen_name):
-                    old, created_at = prev.get(s.user.screen_name)
-                    vec = _add_old_weight(vec, old, (s.created_at - created_at).seconds)
-                vec_ = _tf_idf(vec, df, N)
-                sim = _cosine_sim(myvec_, vec_)
+                vec = _tf_idf(_bag_of_words(s.text, tagger), df, N)
+                sim = -1
+                for sp in self_posts_:
+                    sim = max(sim, _cosine_sim(vec, sp))
                 print sim, s.text
                 if sim >= self._conf.getfloat('options', 'threshold'):
                     if use_official_retweet:
@@ -220,8 +185,6 @@ class Similot(object):
                             self._api['bot'].update_status((u'RT %s: %s' % (s.user.screen_name, s.text))[:140])
                         except:
                             pass # twitterが死んでる等
-                prev[s.user.screen_name] = (vec, s.created_at)
-
             time.sleep(update_interval)
 
 
