@@ -119,40 +119,47 @@ class Similot(object):
         for section in ('main', 'bot'):
             self._api[section] = _get_api(self._conf.get(section, 'key'),
                                           self._conf.get(section, 'secret'))
+        self._reply_pattern = re.compile('^\.?(@[0-9A-Z_a-z]+\s+)+')
+        self._retweet_pattern = re.compile('RT\s+@?[0-9A-Z_a-z]+\s*:?\s+')
+
+
+    def _preprocess(self, text):
+        text = self._reply_pattern.sub('', text)
+        text = self._retweet_pattern.sub('', text)
+        return text
+
 
     def run(self):
         '''main loop'''
-        since_id = 0
         tagger = MeCab.Tagger('-Ochasen')
         max_posts = self._conf.getint('options', 'max_posts')
         update_interval = self._conf.getint('options', 'update_interval')
-        use_official_retweet = self._conf.getboolean('options', 'use_official_retweet')
-        reply_pattern = re.compile('^\.?(@[0-9A-Z_a-z]+\s+)+')
-        retweet_pattern = re.compile('RT\s+@?[0-9A-Z_a-z]+\s*:?\s+')
         recent = self._conf.getint('options', 'recent')
+        use_official_retweet = self._conf.getboolean('options', 'use_official_retweet')
         screen_names = {
             'main':self._api['main'].me().screen_name,
             'bot':self._api['bot'].me().screen_name,
         }
-        posts = []
-        self_posts = [_bag_of_words(s.text, tagger) for s in self._api['main'].user_timeline(screen_names['main'])][:recent]
+        posts, statuses = [], []
+        for status in tweepy.Cursor(self._api['main'].home_timeline, count=200).items(max_posts):
+            statuses.append(status)
+        since_id = statuses[0].id
+        statuses.reverse()
+        for status in statuses:
+            posts.append(_bag_of_words(self._preprocess(status.text), tagger))
+        self_posts = [_bag_of_words(self._preprocess(s.text), tagger) for s
+                      in self._api['main'].user_timeline(screen_names['main'])][:recent]
         self_posts.reverse()
 
         while True:
+            time.sleep(update_interval)
             try:
-                if since_id:
-                    timeline = self._api['main'].home_timeline(since_id=since_id)
-                else:
-                    timeline = self._api['main'].home_timeline(count=200)
+                timeline = self._api['main'].home_timeline(since_id=since_id)
                 since_id = timeline[0].id
                 timeline.reverse() # 新しいのを後ろにする
             except:
                 timeline = []
 
-            # remove '^@screen_name' and unofficial retweets
-            for status in timeline:
-                status.text = reply_pattern.sub('', status.text)
-                status.text = retweet_pattern.sub('', status.text)
             # filter
             new = [s for s in timeline
                    if s.user.screen_name != screen_names['main'] and
@@ -160,17 +167,17 @@ class Similot(object):
 
             # update self vec
             for s in (s for s in timeline if s.user.screen_name == screen_names['main']):
-                self_posts.append(_bag_of_words(s.text, tagger))
+                self_posts.append(_bag_of_words(self._preprocess(s.text), tagger))
             self_posts = self_posts[-recent:]
 
-            posts.extend(_bag_of_words(s.text, tagger) for s in timeline)
+            posts.extend(_bag_of_words(self._preprocess(s.text), tagger) for s in timeline)
             posts = posts[-max_posts:]
             df = _document_freq(posts+self_posts)
             N = len(posts)
             self_posts_ = [_tf_idf(v, df, N) for v in self_posts]
 
             for s in new:
-                vec = _tf_idf(_bag_of_words(s.text, tagger), df, N)
+                vec = _tf_idf(_bag_of_words(self._preprocess(s.text), tagger), df, N)
                 sim = -1
                 for sp in self_posts_:
                     sim = max(sim, _cosine_sim(vec, sp))
@@ -186,7 +193,6 @@ class Similot(object):
                             self._api['bot'].update_status((u'RT %s: %s' % (s.user.screen_name, s.text))[:140])
                         except:
                             pass # twitterが死んでる等
-            time.sleep(update_interval)
 
 
     def _parse(self):
