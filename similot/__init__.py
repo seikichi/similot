@@ -129,12 +129,13 @@ class Similot(object):
         use_official_retweet = self._conf.getboolean('options', 'use_official_retweet')
         reply_pattern = re.compile('^\.?(@[0-9A-Z_a-z]+\s+)+')
         retweet_pattern = re.compile('RT\s+@?[0-9A-Z_a-z]+\s*:?\s+')
+        recent = self._conf.getint('options', 'recent')
         screen_names = {
             'main':self._api['main'].me().screen_name,
             'bot':self._api['bot'].me().screen_name,
         }
         posts = []
-        self_posts = [_bag_of_words(s.text, tagger) for s in self._api['main'].user_timeline(screen_names['main'])][:5]
+        self_posts = [_bag_of_words(s.text, tagger) for s in self._api['main'].user_timeline(screen_names['main'])][:recent]
         self_posts.reverse()
 
         while True:
@@ -160,7 +161,7 @@ class Similot(object):
             # update self vec
             for s in (s for s in timeline if s.user.screen_name == screen_names['main']):
                 self_posts.append(_bag_of_words(s.text, tagger))
-            self_posts = self_posts[-5:]
+            self_posts = self_posts[-recent:]
 
             posts.extend(_bag_of_words(s.text, tagger) for s in timeline)
             posts = posts[-max_posts:]
@@ -210,7 +211,8 @@ class Similot(object):
         for key, val in {'update_interval':'60',
                          'use_official_retweet':'false',
                          'max_posts':'1000',
-                         'threshold':'0.2'}.items():
+                         'threshold':'0.15',
+                         'recent':'8'}.items():
             self._conf.set('options', key, val)
 
         for section in ('main', 'bot'):
